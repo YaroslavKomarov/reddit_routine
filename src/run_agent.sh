@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [ ! -f .env ]; then
-    echo "[run_agent] ERROR: .env not found — скопируй .env.example в .env и заполни ANTHROPIC_API_KEY" >&2
+    echo "[run_agent] ERROR: .env not found — скопируй .env.example в .env и заполни секреты" >&2
     exit 1
 fi
 source .env
@@ -54,7 +54,11 @@ if [ -n "$MODEL_FLAG" ]; then
     MODEL_ARGS=(--model "$MODEL_FLAG")
 fi
 
-claude --bare -p "$PROMPT" \
+# Без --bare: bare-режим не подхватывает подписочную сессию Claude.ai
+# (проверено на 2.1.204) — а аутентификация идёт по подписке, не по API-ключу.
+# Изоляция контекста обеспечена окружением VPS: CLAUDE.md/.claude/MCP в
+# репозиторий не входят и на сервере отсутствуют.
+claude -p "$PROMPT" \
     --allowedTools "Read" \
     --max-turns "$MAX_TURNS" \
     --max-budget-usd "$MAX_BUDGET" \

@@ -23,12 +23,23 @@
    sudo apt install -y python3 python3-pip python3-venv nodejs npm
    ```
 
-2. **Установка Claude Code** (нужен для headless-вызова агента, шаг `run_agent.sh`):
+2. **Установка Claude Code и логин по подписке** (нужен для headless-вызова
+   агента, шаг `run_agent.sh`):
 
    ```bash
    npm install -g @anthropic-ai/claude-code
    claude --version
+   claude        # интерактивно: выбрать вход через аккаунт Claude.ai (подписка)
    ```
+
+   При `claude` CLI выдаст ссылку — открыть в браузере на любом устройстве,
+   авторизоваться под аккаунтом с активной подпиской Pro/Max, вставить код
+   обратно в терминал. Логиниться нужно под тем же пользователем, от которого
+   пойдёт cron (сессия хранится в его `~/.claude/`). После входа — `/exit`.
+
+   > Важно: `run_agent.sh` вызывает `claude -p` **без** `--bare` — bare-режим
+   > не подхватывает подписочную сессию (отвечает «Not logged in»). Поэтому
+   > `ANTHROPIC_API_KEY` в `.env` оставляем пустым.
 
 3. **Размещение проекта и виртуальное окружение** (например, в `/opt/reddit-routine`):
 
@@ -66,10 +77,11 @@
    ```
 
    Заполнить `.env` реальными значениями: `TELEGRAM_BOT_TOKEN`,
-   `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY` (см. комментарии в `.env.example`).
-   Headless-вызов `claude --bare` (шаг `run_agent.sh`) аутентифицируется через
-   `ANTHROPIC_API_KEY` из `.env`. Reddit-credentials не нужны: сбор постов
-   идёт через публичный анонимный Atom-фид.
+   `TELEGRAM_CHAT_ID` (см. комментарии в `.env.example`). `ANTHROPIC_API_KEY`
+   оставить **пустым** — headless-вызов `claude -p` (шаг `run_agent.sh`)
+   аутентифицируется по подписке владельца (см. шаг с `claude /login` ниже).
+   Reddit-credentials не нужны: сбор постов идёт через публичный анонимный
+   Atom-фид.
 
 7. **Наполнение владельцем** — см. раздел «Что нужно заполнить владельцу» ниже
    (`context/product.md`, `context/rules/<sub>.md`, `context/tone.md`,

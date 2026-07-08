@@ -10,7 +10,7 @@
 |-----------|-----------|
 | `TELEGRAM_BOT_TOKEN` | Токен бота (получить у @BotFather) |
 | `TELEGRAM_CHAT_ID` | ID чата/пользователя для дайджеста |
-| `ANTHROPIC_API_KEY` | Аутентификация headless-вызова `claude -p --bare` |
+| `ANTHROPIC_API_KEY` (опционально) | Оставить **пустым** — тогда `claude -p` идёт по подписке владельца (`claude /login` на VPS). Заполнять только для сознательной оплаты через API. Пустая строка = «не задано»; не вписывать пробел/значение просто так |
 | `AGENT_MAX_TURNS` (опционально) | Override лимита ходов агента поверх `config.yaml` |
 | `AGENT_MAX_BUDGET` (опционально) | Override бюджета агента поверх `config.yaml` |
 

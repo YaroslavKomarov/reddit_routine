@@ -80,9 +80,12 @@ python src/build_agent_input.py
 
 ## Вызов агента (`src/run_agent.sh`)
 
-Headless-вызов Claude Code строго с `--bare`, `--max-turns`, `--max-budget-usd`
-(раздел 5.3 спеки). Промпт — `prompts/daily_digest.md`, вход — stdin из
-`agent_input.json`, выход — `data/tmp/agent_raw.json`:
+Headless-вызов Claude Code (`claude -p`, аутентификация по подписке владельца)
+с жёсткими `--max-turns` и `--max-budget-usd` (раздел 5.3 спеки). Флаг `--bare`
+не используется — он несовместим с подписочной сессией (отвечает «Not logged
+in»), а изоляция контекста и так обеспечена отсутствием `CLAUDE.md`/`.claude/`
+на VPS. Промпт — `prompts/daily_digest.md`, вход — stdin из `agent_input.json`,
+выход — `data/tmp/agent_raw.json`:
 
 ```bash
 bash src/run_agent.sh
