@@ -1,0 +1,14 @@
+.env
+data/
+logs/
+__pycache__/
+*.pyc
+
+# AI Factory / Claude Code tooling (not part of the product)
+.ai-factory/
+.ai-factory.json
+.claude/
+.mcp.json
+skills-lock.json
+CLAUDE.md
+AGENTS.md

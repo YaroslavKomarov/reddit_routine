@@ -1,0 +1,90 @@
+# Reddit Routine — конфигурация системы
+# Полная спецификация полей: reddit-routine-spec.md, раздел 3.
+# Список выверен владельцем 2026-07-06 по context/rules/<sub>.md.
+
+subreddits:
+  # Каждый сабреддит — отдельные настройки промо и типов постов.
+  # name: имя сабреддита без "r/"
+  # promo_allowed: можно ли вообще упоминать продукт в комментариях в этом сабе
+  # promo_cooldown_days: минимум дней между промо-комментами в этом сабе
+  # question_posts_allowed: подходит ли саб для публикации "вопросов-постов" из очереди
+  # review_post_allowed: разрешён ли разовый пост "смотрите что я сделал" (review-пост)
+  - name: SEO
+    promo_allowed: true          # только название без ссылки, очень осторожно (no apps, no links)
+    promo_cooldown_days: 14
+    question_posts_allowed: true
+    review_post_allowed: false   # запрещено правилами: No Apps
+
+  - name: TechSEO
+    promo_allowed: true          # название без ссылки в технических ответах
+    promo_cooldown_days: 14
+    question_posts_allowed: true # только развёрнутые технические вопросы
+    review_post_allowed: false   # наш пост уже удалялся спам-фильтром
+
+  - name: bigseo
+    promo_allowed: false         # прямой запрет: No free tools or beta tests
+    promo_cooldown_days: 30
+    question_posts_allowed: false # нет новичкового контента, только экспертные комментарии
+    review_post_allowed: false
+
+  - name: SEO_tools_reviews
+    promo_allowed: true          # текстом без ссылки: name + what it does + why it matters
+    promo_cooldown_days: 7
+    question_posts_allowed: true
+    review_post_allowed: true    # наш пост уже опубликован и живёт
+
+  - name: SideProject
+    promo_allowed: true          # ссылки разрешены, формат "история + фидбек"
+    promo_cooldown_days: 7
+    question_posts_allowed: true # вопросы под инди-аудиторию, не SEO-экспертизу
+    review_post_allowed: true
+
+  - name: webdev
+    promo_allowed: true           # только комментарии; за прямую рекламу бан
+    promo_cooldown_days: 14
+    question_posts_allowed: false # автомод: аккаунт <3 мес без кармы — посты удаляются (проверено)
+    review_post_allowed: false    # включить после снятия карма-гейта; только Showoff Saturday
+
+  - name: digital_marketing
+    promo_allowed: true          # ссылка на CWS допустима; посты заблокированы до набора кармы
+    promo_cooldown_days: 14
+    question_posts_allowed: true
+    review_post_allowed: true    # после набора кармы
+
+  - name: chrome_extensions
+    promo_allowed: true          # аудитория — разработчики расширений; фидбек-посты типичны
+    promo_cooldown_days: 14
+    question_posts_allowed: true # вопросы про MV3/CWS — наша реальная экспертиза
+    review_post_allowed: true    # наш пост ожидает разбана — уточнить причину у модов
+
+fetch:
+  # За сколько последних часов собирать посты (спека: ~12ч)
+  window_hours: 12
+  # Сколько постов тянуть из /r/{sub}/new.json за один запрос на сабреддит
+  posts_per_sub_limit: 50
+  # Минимальный score поста, чтобы попасть в отбор (0 = без фильтра по score)
+  min_post_score: 0
+  # ВЛАДЕЛЕЦ: не менять на произвольный User-Agent — используется дефолт из спеки дословно
+  user_agent: "web:reddit-routine:v1.0 (personal digest tool)"
+
+selection:
+  # Диапазон количества постов, отбираемых агентом на один сабреддит за прогон
+  posts_per_sub: [3, 5]
+  # Ориентир для агента: целевая доля промо-комментов среди всех предложенных черновиков
+  promo_ratio_target: "1 из 6"
+
+agent:
+  # Пусто = дефолтная модель Claude Code; при необходимости задать явно, например "sonnet"
+  model_flag: ""
+  # Жёсткий лимит числа ходов агента за один вызов run_agent.sh
+  max_turns: 10
+  # Жёсткий лимит бюджета в USD за один вызов агента (--max-budget-usd)
+  # ВАЖНО: значения по умолчанию для run_agent.sh (milestone 6) должны совпадать
+  # с этими двумя полями, чтобы источники дефолтов не расходились (см. .env.example).
+  max_budget_usd: 1.00
+
+telegram:
+  # Информативное время отправки; фактическое время прогона задаёт cron на VPS
+  send_time: "09:00"
+  # Разбивать длинный дайджест на отдельные сообщения по сабреддитам (иначе одно большое)
+  split_by_subreddit: true
