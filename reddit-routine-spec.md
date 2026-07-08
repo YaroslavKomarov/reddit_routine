@@ -9,7 +9,7 @@
 Система каждый день в заданное время:
 
 1. Достаёт из локальной очереди один заранее подготовленный "технический вопрос-пост" и назначает ему целевой сабреддит.
-2. Собирает свежие посты (последние ~12 часов) из списка отслеживаемых сабреддитов через официальный read-only OAuth API Reddit (`oauth.reddit.com`).
+2. Собирает свежие посты (последние ~12 часов) из списка отслеживаемых сабреддитов через публичный Atom-фид Reddit (`https://www.reddit.com/r/{sub}/new/.rss`), анонимный read-only доступ без OAuth и без credentials.
 3. Прогоняет собранные посты через Claude Code в headless-режиме (`claude -p --bare`): агент отбирает 3–5 релевантных постов на сабреддит и пишет черновики комментариев с учётом правил каждого сабреддита.
 4. Отправляет владельцу дайджест в Telegram: пост дня + список постов с черновиками комментов.
 5. Владелец постит вручную. Система **никогда не публикует ничего сама** — это жёсткое требование.
@@ -23,7 +23,7 @@ reddit-routine/
 ├── CLAUDE.md                  # контекст проекта для интерактивной разработки
 ├── README.md                  # как деплоить и эксплуатировать
 ├── config.yaml                # конфиг: сабреддиты, лимиты, расписание promo-кулдаунов
-├── .env.example               # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY, REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET
+├── .env.example               # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY
 ├── requirements.txt           # requests, pyyaml, python-dotenv (минимум зависимостей)
 ├── run_daily.sh               # оркестратор: fetch → agent → format → send → commit state
 ├── src/
@@ -60,8 +60,8 @@ subreddits:
 
 fetch:
   window_hours: 12
-  posts_per_sub_limit: 50        # сколько тянуть из oauth.reddit.com/r/{sub}/new
-  min_post_score: 0              # фильтр мусора, 0 = без фильтра
+  posts_per_sub_limit: 50        # сколько тянуть из www.reddit.com/r/{sub}/new/.rss
+  min_post_score: 0              # НЕ ДЕЙСТВУЕТ: публичный Atom-фид score не отдаёт
   user_agent: "web:reddit-routine:v1.0 (personal digest tool)"
 
 selection:
@@ -123,12 +123,12 @@ CREATE TABLE IF NOT EXISTS run_log (
 
 ### 5.1 `fetch_posts.py`
 
-- Перед обходом сабреддитов получить application-only OAuth-токен: POST `https://www.reddit.com/api/v1/access_token` с Basic Auth (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET` из `.env`) и `grant_type=client_credentials` — read-only, без прав записи. Токен запрашивается заново при каждом запуске, не кэшируется и не логируется. Неудача получения токена → статус `fetch_failed`.
-- Для каждого сабреддита из конфига: GET `https://oauth.reddit.com/r/{sub}/new?limit={posts_per_sub_limit}` с User-Agent из конфига и заголовком `Authorization: Bearer {token}`.
-- Ретраи (и для token-эндпоинта, и для сабреддитов): 3 попытки с экспоненциальным backoff (2s/8s/30s) на 429 и 5xx. Пауза 2 секунды между сабреддитами.
-- Фильтрация: `created_utc` в пределах `window_hours`; отбросить посты, чей `id` уже есть в `seen_posts`; отбросить stickied и посты с `removed_by_category`.
-- Выход: `data/tmp/posts_batch.json` — массив объектов `{id, subreddit, title, selftext (усечь до 2000 символов), url, permalink, score, num_comments, created_utc}`.
-- Если хотя бы один сабреддит отдал данные — продолжаем; если все упали — статус `fetch_failed`, отправить в Telegram короткое сообщение об ошибке и выйти с ненулевым кодом.
+- Для каждого сабреддита из конфига: анонимный GET `https://www.reddit.com/r/{sub}/new/.rss?limit={posts_per_sub_limit}` с честным User-Agent из конфига — без OAuth, без credentials, без заголовка `Authorization`. Ответ — Atom-фид (`content-type: application/atom+xml`), парсится stdlib (`xml.etree.ElementTree`); это парсинг API-формата, который Reddit сам отдаёт, а не скрейпинг HTML-страниц.
+- Ретраи: 3 попытки с экспоненциальным backoff (2s/8s/30s) на 429 и 5xx. Анонимный бюджет rate limit жёсткий (~1 запрос на ~30-секундное окно) — пауза между сабреддитами подстраивается под заголовки `x-ratelimit-remaining`/`x-ratelimit-reset` ответа (при отсутствии заголовков — консервативная пауза 30с); полный прогон по 8 сабреддитам занимает ориентировочно ~4 минуты.
+- Маппинг полей из `<entry>`: `id` — из `<id>` со срезанным префиксом `t3_` (совместимо с существующими `seen_posts`); `created_utc` — из `<published>` (fallback `<updated>`); `permalink`/`url` — из `href` единственного `<link>` без `rel` (внешний URL линк-постов в фиде недоступен, `url` дублирует `permalink`); `selftext` — текст из `<content>` без HTML-тегов, обрезанный по маркеру `submitted by ...` и усечённый до 2000 символов; `score`/`num_comments` — публичный фид их не отдаёт, всегда `0`.
+- Фильтрация: `created_utc` в пределах `window_hours`; отбросить посты, чей `id` уже есть в `seen_posts`. Фильтров по `stickied`/`removed_by_category`/`score` больше нет — фид их не отдаёт.
+- Выход: `data/tmp/posts_batch.json` — массив объектов `{id, subreddit, title, selftext, url, permalink, score, num_comments, created_utc}` (формат не изменился; `score`/`num_comments` всегда `0`).
+- Если хотя бы один сабреддит отдал данные (включая случай валидного XML без ошибок парсинга) — продолжаем; если все упали (сетевая ошибка или невалидный XML) — статус `fetch_failed`, отправить в Telegram короткое сообщение об ошибке и выйти с ненулевым кодом.
 
 ### 5.2 `build_agent_input.py`
 
@@ -273,7 +273,7 @@ python src/db.py --log-run ok
 ## 6. Жёсткие ограничения (не нарушать при реализации)
 
 1. **Никакой автопубликации.** Система не должна иметь кода, который постит/комментирует на Reddit. Никаких Reddit OAuth-токенов с правами на запись.
-2. **Только официальный read-only OAuth API Reddit** (`oauth.reddit.com`, application-only `client_credentials`) — без прав записи, честный User-Agent, паузы между запросами. Не обходить rate limit, не парсить HTML.
+2. **Только публичный Atom-фид Reddit** (`https://www.reddit.com/r/{sub}/new/.rss`), анонимный read-only доступ без OAuth и без credentials — честный User-Agent, уважение `x-ratelimit-*` заголовков, паузы между запросами. Не обходить rate limit, не скрейпить HTML-страницы.
 3. Секреты только в `.env` (в `.gitignore`), в репозитории — `.env.example`.
 4. Агент вызывается только с `--bare`, `--max-turns`, `--max-budget-usd` — без исключений.
 5. Минимум зависимостей: stdlib + `requests` + `pyyaml` + `python-dotenv`. Без фреймворков, без async, без ORM.

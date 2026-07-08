@@ -26,7 +26,9 @@
   если очередь вопросов пуста.
 - `posts` — массив постов
   `{"id", "subreddit", "title", "selftext", "url", "permalink", "score", "num_comments", "created_utc"}`.
-  Только из этого массива можно брать посты для дайджеста.
+  Только из этого массива можно брать посты для дайджеста. `score` и
+  `num_comments` всегда `0` (публичный Atom-фид Reddit их не отдаёт) — не
+  используй эти поля для ранжирования или оценки релевантности.
 - `selection_config` — `{"posts_per_sub": [min, max], "promo_ratio_target": "..."}`.
 
 # Выход
