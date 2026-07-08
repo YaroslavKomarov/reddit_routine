@@ -75,7 +75,7 @@ selection:
 
 agent:
   # Пусто = дефолтная модель Claude Code; при необходимости задать явно, например "sonnet"
-  model_flag: ""
+  model_flag: "sonnet"
   # Жёсткий лимит числа ходов агента за один вызов run_agent.sh
   max_turns: 10
   # Жёсткий лимит бюджета в USD за один вызов агента (--max-budget-usd)
