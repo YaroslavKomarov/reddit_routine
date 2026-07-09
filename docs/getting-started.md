@@ -118,11 +118,14 @@
     ```
 
 11. **Cron.** Две независимые задачи: ежедневный дайджест и опрос кнопки
-    «✅ Запостил» (раз в ~5 минут, реагирует на нажатия под промо-постами):
+    «✅ Запостил» (раз в ~15 минут, реагирует на нажатия под промо-постами —
+    само нажатие не привязано к расписанию опроса, Telegram хранит его в
+    очереди ~24ч, так что реже опрашивать безопасно, это влияет только на
+    задержку подтверждения в чате):
 
     ```
     0 9 * * * cd /opt/reddit-routine && PYTHON_BIN=/opt/reddit-routine/.venv/bin/python ./run_daily.sh >> logs/cron.log 2>&1
-    */5 * * * * cd /opt/reddit-routine && flock -n data/.callbacks.lock /opt/reddit-routine/.venv/bin/python src/process_promo_callbacks.py >> logs/callbacks.log 2>&1
+    */15 * * * * cd /opt/reddit-routine && flock -n data/.callbacks.lock /opt/reddit-routine/.venv/bin/python src/process_promo_callbacks.py >> logs/callbacks.log 2>&1
     ```
 
     Вторая строка вызывает интерпретатор venv напрямую под `flock -n` (в
