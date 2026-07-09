@@ -4,7 +4,14 @@
 
 ## После публикации промо-коммента
 
-Система не знает, что вы реально запостили — залогируйте это вручную:
+Под каждым промо-постом в дайджесте — инлайн-кнопка **«✅ Запостил»**. Нажатие
+логирует факт публикации в `promo_history` (обрабатывает отдельная cron-задача
+`process_promo_callbacks.py`, раз в ~5 минут; см. reddit-routine-spec.md,
+раздел 5.10). Это чисто локальный учёт — сама система на Reddit ничего не постит,
+опросчик ходит только в Telegram Bot API.
+
+Fallback (кнопка недоступна — сообщение слишком старое, `getUpdates`-ретенция
+Telegram истекла, или опросчик временно лежал):
 
 ```bash
 python src/question_queue.py log-promo <subreddit> comment_promo
@@ -55,6 +62,21 @@ python src/question_queue.py log-promo <subreddit> comment_promo
    - посмотреть поле `error` в выводе `--show-runs` — короткая причина;
    - подробности — в лог-файле соответствующего дня, `logs/YYYY-MM-DD.log`
      (и `logs/cron.log`, если прогон шёл через cron).
+
+## Troubleshooting: опросчик кнопки «✅ Запостил»
+
+- Логи опросчика — `logs/callbacks.log` (отдельная cron-задача, не пишет в
+  `logs/YYYY-MM-DD.log` и не шлёт уведомления в Telegram при ошибке —
+  это фоновая вторичная задача).
+- **409 Conflict** от `getUpdates` — у бота установлен webhook, long-polling
+  несовместим с ним. Снять webhook:
+  ```bash
+  curl https://api.telegram.org/bot<TOKEN>/deleteWebhook
+  ```
+- Ретенция `getUpdates` у Telegram — ориентировочно 24 часа. Если опросчик не
+  запускался дольше (упавший cron, остановленный сервер) — нажатия за это
+  время безвозвратно теряются; залогировать пропущенные промо вручную через
+  `log-promo` (см. выше).
 
 ## See Also
 

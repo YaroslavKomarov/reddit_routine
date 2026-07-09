@@ -154,6 +154,46 @@ class TestQuestionQueue(DbTestCase):
             db.add_question("   ")
 
 
+class TestTelegramOffset(DbTestCase):
+    def test_fresh_db_offset_is_zero(self):
+        self.assertEqual(db.get_telegram_offset(), 0)
+
+    def test_set_then_get_round_trip(self):
+        db.set_telegram_offset(42)
+        self.assertEqual(db.get_telegram_offset(), 42)
+
+    def test_set_twice_upserts_not_duplicates(self):
+        db.set_telegram_offset(1)
+        db.set_telegram_offset(2)
+        self.assertEqual(db.get_telegram_offset(), 2)
+        conn = db.connect()
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) AS n FROM telegram_state WHERE key = 'updates_offset'"
+            ).fetchone()["n"]
+        finally:
+            conn.close()
+        self.assertEqual(count, 1)
+
+    def test_offset_persists_across_new_connection(self):
+        db.set_telegram_offset(99)
+        conn = db.connect()
+        conn.close()
+        self.assertEqual(db.get_telegram_offset(), 99)
+
+    def test_corrupted_offset_raises_value_error(self):
+        conn = db.connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO telegram_state (key, value) VALUES ('updates_offset', 'not-a-number')"
+                )
+        finally:
+            conn.close()
+        with self.assertRaises(ValueError):
+            db.get_telegram_offset()
+
+
 class TestRunLog(DbTestCase):
     def test_log_run_writes_row(self):
         db.log_run("ok", posts_fetched=10, posts_suggested=4, cost_usd=0.12)

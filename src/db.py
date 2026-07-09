@@ -60,7 +60,15 @@ _SCHEMA = {
             error           TEXT
         )
     """,
+    "telegram_state": """
+        CREATE TABLE IF NOT EXISTS telegram_state (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """,
 }
+
+_TELEGRAM_OFFSET_KEY = "updates_offset"
 
 _PROMO_TYPES = {"comment_promo", "question_post", "review_post"}
 _RUN_STATUSES = {"ok", "fetch_failed", "agent_failed", "tg_failed"}
@@ -263,6 +271,36 @@ def queue_stats() -> dict:
         ).fetchone()["n"]
     logger.debug("[db.queue_stats] unused=%d used=%d", unused, used)
     return {"unused": unused, "used": used}
+
+
+# --- telegram_state -----------------------------------------------------------
+
+def get_telegram_offset() -> int:
+    with contextlib.closing(connect()) as conn:
+        row = conn.execute(
+            "SELECT value FROM telegram_state WHERE key = ?", (_TELEGRAM_OFFSET_KEY,)
+        ).fetchone()
+    if row is None:
+        logger.debug("[db.get_telegram_offset] no stored offset, defaulting to 0")
+        return 0
+    try:
+        offset = int(row["value"])
+    except (TypeError, ValueError):
+        logger.error("[db.get_telegram_offset] corrupted offset value: %r", row["value"])
+        raise ValueError(f"corrupted telegram_state offset value: {row['value']!r}")
+    logger.debug("[db.get_telegram_offset] offset=%d", offset)
+    return offset
+
+
+def set_telegram_offset(update_id: int) -> None:
+    with contextlib.closing(connect()) as conn:
+        with conn:
+            conn.execute(
+                "INSERT INTO telegram_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_TELEGRAM_OFFSET_KEY, str(update_id)),
+            )
+    logger.debug("[db.set_telegram_offset] offset=%d", update_id)
 
 
 # --- run_log -------------------------------------------------------------------

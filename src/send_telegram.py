@@ -111,8 +111,53 @@ def format_stats(stats: dict, queue_stats: dict, skipped_subs: list, has_promo: 
         for entry in skipped_subs:
             lines.append(f"— r/{escape(entry.get('subreddit', '?'))}: {escape(entry.get('reason', ''))}")
     if has_promo:
-        lines += ["", "🔥 " + escape("Запостил промо — залогируй: python src/question_queue.py log-promo <sub> comment_promo")]
+        lines += ["", "🔥 " + escape(
+            "Запостил промо — жми кнопку «✅ Запостил» под постом; "
+            "fallback: python src/question_queue.py log-promo <sub> comment_promo"
+        )]
     return "\n".join(lines)
+
+
+_MAX_CALLBACK_DATA_BYTES = 64
+_BUTTON_TITLE_MAX_CHARS = 30
+
+
+def build_promo_keyboard(group: dict):
+    """Инлайн-клавиатура «✅ Запостил» для промо-постов сабреддита, или None."""
+    sub = group.get("subreddit", "")
+    posts = group.get("posts") or []
+    rows = []
+    for post in posts:
+        if post.get("is_promo") is not True:
+            continue
+        post_id = post.get("post_id", "")
+        callback_data = f"promo:{sub}:{post_id}"
+        callback_bytes = len(callback_data.encode("utf-8"))
+        if callback_bytes > _MAX_CALLBACK_DATA_BYTES:
+            logger.warning(
+                "[send_telegram.build_promo_keyboard] callback_data %d bytes exceeds %d, "
+                "skipping button (sub='%s' post_id='%s')",
+                callback_bytes, _MAX_CALLBACK_DATA_BYTES, sub, post_id,
+            )
+            continue
+        title = str(post.get("post_title", ""))[:_BUTTON_TITLE_MAX_CHARS]
+        rows.append([{"text": f"✅ Запостил: {title}", "callback_data": callback_data}])
+        logger.debug(
+            "[send_telegram.build_promo_keyboard] sub='%s' post_id='%s' callback_bytes=%d",
+            sub, post_id, callback_bytes,
+        )
+    if not rows:
+        return None
+    return {"inline_keyboard": rows}
+
+
+def _chunks_with_keyboard(text: str, keyboard) -> list:
+    """split_message(text) как пары (chunk, reply_markup); клавиатура — на последнем chunk."""
+    chunks = [(chunk, None) for chunk in split_message(text)]
+    if keyboard and chunks:
+        last_text, _ = chunks[-1]
+        chunks[-1] = (last_text, keyboard)
+    return chunks
 
 
 def _unclosed_tags(text: str) -> list:
@@ -191,9 +236,9 @@ def split_message(text: str, limit: int = _TG_LIMIT) -> list:
 
 
 def build_messages(digest: dict, stats: dict, queue_stats: dict, split_by_subreddit: bool) -> list:
-    """Полный список сообщений дайджеста в порядке отправки."""
+    """Полный список пар (text, reply_markup | None) дайджеста в порядке отправки."""
     logger.debug("[send_telegram.build_messages] split_by_subreddit=%s", split_by_subreddit)
-    messages = [format_question_post(digest.get("question_post"), queue_stats.get("unused", 0))]
+    messages = [(format_question_post(digest.get("question_post"), queue_stats.get("unused", 0)), None)]
 
     groups = digest.get("suggestions") or []
     has_promo = any(
@@ -201,14 +246,22 @@ def build_messages(digest: dict, stats: dict, queue_stats: dict, split_by_subred
         for group in groups
         for post in (group.get("posts") or [])
     )
-    sub_texts = [format_subreddit_message(group) for group in groups]
     if split_by_subreddit:
-        for text in sub_texts:
-            messages.extend(split_message(text))
-    elif sub_texts:
-        messages.extend(split_message("\n\n".join(sub_texts)))
+        for group in groups:
+            text = format_subreddit_message(group)
+            keyboard = build_promo_keyboard(group)
+            messages.extend(_chunks_with_keyboard(text, keyboard))
+    elif groups:
+        combined_text = "\n\n".join(format_subreddit_message(group) for group in groups)
+        combined_rows = []
+        for group in groups:
+            keyboard = build_promo_keyboard(group)
+            if keyboard:
+                combined_rows.extend(keyboard["inline_keyboard"])
+        combined_keyboard = {"inline_keyboard": combined_rows} if combined_rows else None
+        messages.extend(_chunks_with_keyboard(combined_text, combined_keyboard))
 
-    messages.append(format_stats(stats, queue_stats, digest.get("skipped_subs") or [], has_promo))
+    messages.append((format_stats(stats, queue_stats, digest.get("skipped_subs") or [], has_promo), None))
     logger.info("[send_telegram.build_messages] built %d message(s)", len(messages))
     return messages
 
@@ -218,7 +271,7 @@ def build_messages(digest: dict, stats: dict, queue_stats: dict, split_by_subred
 _MASKED_URL = "https://api.telegram.org/bot***/sendMessage"
 
 
-def send_message(token: str, chat_id: str, text: str, timeout: float = 30.0) -> bool:
+def send_message(token: str, chat_id: str, text: str, timeout: float = 30.0, reply_markup: dict = None) -> bool:
     """Отправить одно сообщение через Bot API; ретраи как в fetch_posts.
 
     Отличие от fetch: при 429 пауза берётся из parameters.retry_after
@@ -232,6 +285,8 @@ def send_message(token: str, chat_id: str, text: str, timeout: float = 30.0) -> 
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
     attempts = len(_RETRY_DELAYS)
     for attempt in range(1, attempts + 1):
         logger.debug("[send_telegram.send_message] attempt=%d url=%s text_len=%d",
@@ -273,10 +328,10 @@ def send_message(token: str, chat_id: str, text: str, timeout: float = 30.0) -> 
 
 
 def _send_all(token: str, chat_id: str, messages: list) -> bool:
-    for index, message in enumerate(messages, 1):
-        logger.info("[send_telegram._send_all] sending message %d/%d, len=%d",
-                    index, len(messages), len(message))
-        if not send_message(token, chat_id, message):
+    for index, (message, reply_markup) in enumerate(messages, 1):
+        logger.info("[send_telegram._send_all] sending message %d/%d, len=%d, has_keyboard=%s",
+                    index, len(messages), len(message), reply_markup is not None)
+        if not send_message(token, chat_id, message, reply_markup=reply_markup):
             logger.error("[send_telegram._send_all] message %d/%d failed, aborting", index, len(messages))
             return False
         if index < len(messages):
@@ -329,9 +384,12 @@ def main(argv=None) -> int:
         logger.info("[send_telegram.main] dry-run: printing %d message(s) to stdout", len(messages))
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8")  # emoji при Windows-консоли в cp1251
-        for index, message in enumerate(messages, 1):
+        for index, (message, reply_markup) in enumerate(messages, 1):
             print(f"--- message {index}/{len(messages)} ---")
             print(message)
+            if reply_markup:
+                button_texts = [btn["text"] for row in reply_markup["inline_keyboard"] for btn in row]
+                print(f"[кнопки: {', '.join(button_texts)}]")
         return 0
 
     if not token or not chat_id:

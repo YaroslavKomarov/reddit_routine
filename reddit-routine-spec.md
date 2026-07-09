@@ -32,6 +32,7 @@ reddit-routine/
 │   ├── run_agent.sh           # обёртка над claude -p (аутентификация по подписке)
 │   ├── parse_agent_output.py  # валидация JSON-ответа агента
 │   ├── send_telegram.py       # форматирование и отправка дайджеста
+│   ├── process_promo_callbacks.py  # ВНЕ конвейера: cron-опрос кнопки «✅ Запостил» (~5 мин)
 │   ├── question_queue.py      # CLI для управления очередью вопросов (add/list/pop/stats)
 │   └── db.py                  # SQLite-слой, миграции при первом запуске
 ├── context/
@@ -115,9 +116,19 @@ CREATE TABLE IF NOT EXISTS run_log (
     cost_usd    REAL,                   -- из --output-format json (total_cost_usd)
     error       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS telegram_state (
+    key   TEXT PRIMARY KEY,             -- 'updates_offset'
+    value TEXT
+);
 ```
 
-Важно: **promo_history пополняется вручную** через `question_queue.py log-promo <sub> <type>` (или отдельную мини-команду), потому что система не знает, что владелец реально запостил. В README описать: "запостил промо — залогируй одной командой". Альтернатива (фаза 2): кнопка-callback в Telegram "✅ Запостил".
+`promo_history` пополняется **inline-кнопкой «✅ Запостил»** под каждым промо-постом
+дайджеста: нажатие обрабатывает отдельный cron-опросчик `process_promo_callbacks.py`
+(раздел 5.10), который логирует факт локально — это НЕ автопубликация на Reddit,
+опросчик ходит только в Telegram Bot API. `question_queue.py log-promo <sub> <type>`
+остаётся как ручной fallback, если кнопка недоступна (например, сообщение
+устарело или бот был недоступен дольше ретенции `getUpdates`, см. раздел 5.10).
 
 ## 5. Компоненты
 
@@ -226,8 +237,38 @@ claude -p "$(cat prompts/daily_digest.md)" \
 - Формат дайджеста:
   - Сообщение 1: `📝 Пост дня → r/{sub}` + title + body вопроса + notes.
   - Далее по одному сообщению на сабреддит: `💬 r/{sub}`, затем для каждого поста: заголовок (ссылкой), 🔥 если `is_promo`, черновик коммента в `<blockquote>` или моноширинным блоком для удобного копирования, строка `why` курсивом.
-  - Финальное сообщение: статистика (постов собрано/предложено, стоимость прогона, остаток очереди вопросов) + напоминание про `log-promo`, если сегодня есть 🔥.
+    Под последним чанком сообщения сабреддита, если в нём есть промо-посты, —
+    инлайн-клавиатура: одна кнопка «✅ Запостил: <title>» на каждый промо-пост
+    (`callback_data = "promo:<sub>:<post_id>"`), обрабатывается `process_promo_callbacks.py`.
+  - Финальное сообщение: статистика (постов собрано/предложено, стоимость прогона, остаток очереди вопросов) + напоминание про кнопку «✅ Запостил» (fallback — `log-promo`), если сегодня есть 🔥.
 - Лимит Telegram — 4096 символов на сообщение: длинные блоки резать по постам.
+
+### 5.10 `process_promo_callbacks.py` — опрос кнопки «✅ Запостил»
+
+Самостоятельный шаг **вне** ежедневного конвейера `run_daily.sh`, отдельная
+cron-задача каждые ~5 минут:
+
+- `GET https://api.telegram.org/bot{TOKEN}/getUpdates?offset=...&allowed_updates=["callback_query"]`,
+  offset — `telegram_state.updates_offset` (таблица из раздела 4), персистентный между прогонами.
+- Валидный `callback_data = "promo:<sub>:<post_id>"` → `db.log_promo(sub, "comment_promo", post_url=...)`
+  (permalink реконструируется строкой `https://www.reddit.com/comments/<post_id>`, без запроса к Reddit) →
+  `answerCallbackQuery` → `editMessageReplyMarkup` убирает нажатую кнопку.
+- Guard по чату (`message.chat.id == TELEGRAM_CHAT_ID`), дедуп повторных нажатий в одном батче,
+  идемпотентность через персистентный offset. `409 Conflict` (если у бота включён webhook) —
+  фатально, без ретраев, с подсказкой снять webhook.
+- Ошибки шага НЕ шлют уведомление в Telegram (это фоновая вторичная задача) — только
+  ненулевой код выхода и ERROR в `logs/callbacks.log`.
+- Ходит **только** в Telegram Bot API — ни одного запроса к Reddit; это НЕ автопубликация,
+  а локальный учёт факта «владелец сам запостил».
+
+Вторая cron-строка (см. раздел 5.9):
+
+```
+*/5 * * * * cd /opt/reddit-routine && flock -n data/.callbacks.lock /opt/reddit-routine/.venv/bin/python src/process_promo_callbacks.py >> logs/callbacks.log 2>&1
+```
+
+`flock -n` обязателен: ретраи `(2, 8, 30)` на нескольких API-вызовах могут растянуть
+прогон дольше 5 минут — без лока второй запуск читает те же апдейты с тем же offset.
 
 ### 5.7 `question_queue.py` (CLI)
 
@@ -266,9 +307,13 @@ python src/db.py --log-run ok
 
 ```
 0 9 * * * cd /opt/reddit-routine && ./run_daily.sh >> logs/cron.log 2>&1
+*/5 * * * * cd /opt/reddit-routine && flock -n data/.callbacks.lock /opt/reddit-routine/.venv/bin/python src/process_promo_callbacks.py >> logs/callbacks.log 2>&1
 ```
 
-Время — по таймзоне VPS; в README указать, как поменять. `.env` должен подхватываться самим скриптом (cron не читает shell-профили).
+Время ежедневного прогона — по таймзоне VPS; в README указать, как поменять. `.env`
+должен подхватываться самим скриптом (cron не читает shell-профили). Вторая строка —
+независимый опрос кнопки «✅ Запостил» (раздел 5.10): прямой вызов интерпретатора
+venv под `flock -n` (`PYTHON_BIN`-префикс работает только для bash-скриптов).
 
 ## 6. Жёсткие ограничения (не нарушать при реализации)
 
@@ -286,7 +331,7 @@ python src/db.py --log-run ok
 
 **Фаза 3 — доставка и оркестрация:** `send_telegram.py`, `run_daily.sh`, cron, README с инструкцией деплоя (установка Claude Code на VPS: `npm install -g @anthropic-ai/claude-code`, `ANTHROPIC_API_KEY`). Критерий: полный прогон одной командой присылает корректно отформатированный дайджест в Telegram, ошибки на каждом шаге дают уведомление.
 
-**Фаза 4 (опционально, отдельным заданием):** inline-кнопка "✅ Запостил" в Telegram → callback → авто-`log-promo` (потребует webhook или long-polling демон — оценить, стоит ли усложнение).
+**Фаза 4 (опционально, реализовано отдельным заданием):** inline-кнопка "✅ Запостил" в Telegram → callback → авто-`log-promo`. Решение по webhook/long-polling — периодический cron-опрос `getUpdates` раз в ~5 минут (`process_promo_callbacks.py`, раздел 5.10), без демона и без webhook.
 
 ## 8. Тесты и приёмка
 

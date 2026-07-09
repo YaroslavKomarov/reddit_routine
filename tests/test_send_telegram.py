@@ -150,6 +150,72 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("5", message)
 
 
+class TestPromoKeyboard(unittest.TestCase):
+    def test_keyboard_none_when_no_promo_posts(self):
+        group = {"subreddit": "SEO", "posts": [
+            {"post_id": "a1", "post_title": "t", "is_promo": False},
+        ]}
+        self.assertIsNone(send_telegram.build_promo_keyboard(group))
+
+    def test_callback_data_format_and_within_byte_limit(self):
+        sub = "a" * 21
+        group = {"subreddit": sub, "posts": [
+            {"post_id": "abc1234567", "post_title": "T", "is_promo": True},
+        ]}
+        keyboard = send_telegram.build_promo_keyboard(group)
+        callback_data = keyboard["inline_keyboard"][0][0]["callback_data"]
+        self.assertEqual(callback_data, f"promo:{sub}:abc1234567")
+        self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+
+    def test_multiple_promo_posts_produce_multiple_rows(self):
+        group = {"subreddit": "SEO", "posts": [
+            {"post_id": "p1", "post_title": "T1", "is_promo": True},
+            {"post_id": "p2", "post_title": "T2", "is_promo": True},
+            {"post_id": "p3", "post_title": "T3", "is_promo": False},
+        ]}
+        keyboard = send_telegram.build_promo_keyboard(group)
+        self.assertEqual(len(keyboard["inline_keyboard"]), 2)
+
+    def test_oversized_callback_data_skips_button(self):
+        group = {"subreddit": "SEO", "posts": [
+            {"post_id": "p" * 60, "post_title": "T", "is_promo": True},
+        ]}
+        self.assertIsNone(send_telegram.build_promo_keyboard(group))
+
+    def test_keyboard_attached_only_to_last_chunk_when_split(self):
+        posts = [
+            {"post_id": "p1", "post_title": "T1", "post_url": "u1",
+             "comment_draft": "d", "why": "w", "is_promo": True},
+        ] + [
+            {"post_id": f"p{i}", "post_title": f"t{i}", "post_url": f"u{i}",
+             "comment_draft": "q" * 500, "why": "w", "is_promo": False}
+            for i in range(12)
+        ]
+        group = {"subreddit": "SEO", "posts": posts}
+        text = send_telegram.format_subreddit_message(group)
+        keyboard = send_telegram.build_promo_keyboard(group)
+        pairs = send_telegram._chunks_with_keyboard(text, keyboard)
+        self.assertGreater(len(pairs), 1)
+        for _, markup in pairs[:-1]:
+            self.assertIsNone(markup)
+        self.assertIsNotNone(pairs[-1][1])
+
+    @patch("send_telegram.requests.post")
+    def test_send_message_includes_reply_markup_when_given(self, mock_post):
+        mock_post.return_value = _response(200)
+        keyboard = {"inline_keyboard": [[{"text": "✅ Запостил: T", "callback_data": "promo:SEO:p1"}]]}
+        send_telegram.send_message("tok", "42", "hi", reply_markup=keyboard)
+        payload = mock_post.call_args.kwargs["data"]
+        self.assertEqual(json.loads(payload["reply_markup"]), keyboard)
+
+    @patch("send_telegram.requests.post")
+    def test_send_message_without_reply_markup_omits_key(self, mock_post):
+        mock_post.return_value = _response(200)
+        send_telegram.send_message("tok", "42", "hi")
+        payload = mock_post.call_args.kwargs["data"]
+        self.assertNotIn("reply_markup", payload)
+
+
 class _CliTestCase(unittest.TestCase):
     """Общий setUp CLI-тестов: временная БД, DIGEST_PATH, токены в env."""
 
@@ -229,6 +295,18 @@ class TestDryRunMode(_CliTestCase):
     def test_dry_run_with_missing_digest_exits_1(self):
         code = send_telegram.main(["--dry-run"])
         self.assertEqual(code, 1)
+
+    @patch("send_telegram.db.log_run")
+    @patch("send_telegram.requests.post")
+    def test_dry_run_prints_button_marker_without_network(self, mock_post, mock_log_run):
+        self._write_digest()
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = send_telegram.main(["--dry-run"])
+        self.assertEqual(code, 0)
+        output = buffer.getvalue()
+        self.assertIn("[кнопки: ✅ Запостил: T1]", output)
+        mock_post.assert_not_called()
 
 
 class TestNormalRun(_CliTestCase):
@@ -331,8 +409,12 @@ class TestDryRunSmokeSubprocess(unittest.TestCase):
 
         messages = re.split(r"--- message \d+/\d+ ---\n", output)[1:]
         self.assertGreaterEqual(len(messages), 4)  # пост дня + сабреддиты (с разбиением) + итоги
+        self.assertIn("[кнопки: ", output)  # промо-пост из фикстуры даёт кнопку в dry-run выводе
         for message in messages:
-            self.assertLessEqual(len(message.rstrip("\n")), 4096)
+            # маркер [кнопки: ...] — chrome только dry-run вывода, в реальном
+            # sendMessage его нет; исключить перед проверкой лимита Telegram
+            text_only = re.sub(r"\n\[кнопки: .*\]$", "", message.rstrip("\n"))
+            self.assertLessEqual(len(text_only), 4096)
 
 
 if __name__ == "__main__":
