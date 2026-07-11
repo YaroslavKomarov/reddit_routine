@@ -22,3 +22,8 @@ jobs:
             source .venv/bin/activate
             pip install -r requirements.txt --quiet
             deactivate
+            # юнит в /etc/systemd/system/ не обновляется git pull'ом — копируем всегда
+            # (идемпотентно); без || true: сбой рестарта должен ронять деплой видимо
+            cp deploy/reddit-routine-callbacks.service /etc/systemd/system/
+            systemctl daemon-reload
+            systemctl restart reddit-routine-callbacks

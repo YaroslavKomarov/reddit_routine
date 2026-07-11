@@ -1,0 +1,23 @@
+# Long-polling демон опроса кнопки «✅ Запостил» (Telegram getUpdates).
+# Установка: cp deploy/reddit-routine-callbacks.service /etc/systemd/system/
+#            systemctl daemon-reload && systemctl enable --now reddit-routine-callbacks
+# Логи: journalctl -u reddit-routine-callbacks
+[Unit]
+Description=Reddit Routine promo callbacks poller (long-polling Telegram getUpdates)
+# After= без парного Wants= эффекта не даёт — нужны оба
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/reddit-routine/.venv/bin/python src/process_promo_callbacks.py
+WorkingDirectory=/opt/reddit-routine
+Restart=always
+RestartSec=10
+# Страховка graceful shutdown: SIGTERM прерывает long poll сразу (хендлер
+# поднимает исключение), но даём запас на завершение батча; long poll <= 60с
+TimeoutStopSec=75
+# stdout/stderr идут в journald по умолчанию (StandardOutput/StandardError=journal);
+# LOG_LEVEL не задаём — .env подхватывается load_dotenv из WorkingDirectory
+
+[Install]
+WantedBy=multi-user.target
