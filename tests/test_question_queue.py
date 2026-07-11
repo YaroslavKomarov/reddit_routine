@@ -92,6 +92,64 @@ class TestAddFile(QuestionQueueCliTestCase):
             os.remove(questions_path)
 
 
+class TestAddFileDedup(QuestionQueueCliTestCase):
+    def _write_questions_file(self, content):
+        fd, questions_path = tempfile.mkstemp(suffix=".md")
+        os.close(fd)
+        self.addCleanup(os.remove, questions_path)
+        Path(questions_path).write_text(content, encoding="utf-8")
+        return questions_path
+
+    def test_repeated_add_file_skips_all_as_duplicates(self):
+        questions_path = self._write_questions_file("first question\n---\nsecond question\n")
+        first = self._run_cli("add", "--file", questions_path)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("добавлено 2 из 2", first.stdout)
+
+        second = self._run_cli("add", "--file", questions_path)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("добавлено 0 из 2", second.stdout)
+        self.assertIn("пропущено дублей 2", second.stdout)
+        self.assertEqual(len(db.list_unused_questions()), 2)
+
+    def test_mixed_file_adds_only_new_questions(self):
+        db.add_question("old question")
+        questions_path = self._write_questions_file("old question\n---\nnew question\n")
+        result = self._run_cli("add", "--file", questions_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("добавлено 1 из 2", result.stdout)
+        self.assertIn("пропущено дублей 1", result.stdout)
+        texts = [q["text"] for q in db.list_unused_questions()]
+        self.assertEqual(sorted(texts), ["new question", "old question"])
+
+    def test_duplicate_inside_one_file_added_once(self):
+        questions_path = self._write_questions_file("same question\n---\nsame question\n")
+        result = self._run_cli("add", "--file", questions_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("добавлено 1 из 2", result.stdout)
+        self.assertIn("пропущено дублей 1", result.stdout)
+        self.assertEqual(len(db.list_unused_questions()), 1)
+
+    def test_used_question_is_not_a_duplicate(self):
+        db.add_question("burned question")
+        popped = db.pop_oldest_question()
+        self.assertEqual(popped["text"], "burned question")
+
+        questions_path = self._write_questions_file("burned question\n")
+        result = self._run_cli("add", "--file", questions_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("добавлено 1 из 1", result.stdout)
+        self.assertNotIn("пропущено дублей", result.stdout)
+        self.assertEqual(len(db.list_unused_questions()), 1)
+
+    def test_file_without_duplicates_has_no_skip_suffix(self):
+        questions_path = self._write_questions_file("unique one\n---\nunique two\n")
+        result = self._run_cli("add", "--file", questions_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("добавлено 2 из 2", result.stdout)
+        self.assertNotIn("пропущено дублей", result.stdout)
+
+
 class TestListStatsPop(QuestionQueueCliTestCase):
     def test_stats_and_list_after_add_and_pop(self):
         db.add_question("q1")

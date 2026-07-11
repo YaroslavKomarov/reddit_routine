@@ -130,14 +130,27 @@ def _add_from_file(file_path: str) -> int:
     parsed = parse_questions_file(text)
     logger.debug("[question_queue._add_from_file] found %d block(s) with question text", len(parsed))
 
+    existing = {q["text"] for q in db.list_unused_questions()}
+    logger.debug("[question_queue._add_from_file] loaded %d existing unused question(s)", len(existing))
+
     added = 0
+    skipped = 0
     for item in parsed:
+        if item["text"] in existing:
+            logger.debug("[question_queue._add_from_file] skipping duplicate text=%.50r", item["text"])
+            skipped += 1
+            continue
         db.add_question(item["text"], item["target_sub"])
+        existing.add(item["text"])
         added += 1
 
     total_blocks = len(_split_blocks(text))
-    logger.info("[question_queue._add_from_file] added %d of %d block(s)", added, total_blocks)
-    print(f"добавлено {added} из {total_blocks}")
+    logger.info(
+        "[question_queue._add_from_file] added=%d skipped=%d total_blocks=%d",
+        added, skipped, total_blocks,
+    )
+    suffix = f" (пропущено дублей {skipped})" if skipped else ""
+    print(f"добавлено {added} из {total_blocks}{suffix}")
     return 0
 
 
