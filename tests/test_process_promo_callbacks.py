@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import signal
 import sys
 import tempfile
 import unittest
@@ -101,7 +102,7 @@ class TestNormalFlow(_BaseTestCase):
         mock_get.return_value = _updates_response(updates)
         mock_post.return_value = _response(200)
 
-        code = ppc.main()
+        code = ppc.main(["--once"])
 
         self.assertEqual(code, 0)
         rows = self._promo_rows()
@@ -120,7 +121,7 @@ class TestNormalFlow(_BaseTestCase):
     def test_empty_updates_exit_0_offset_untouched(self, mock_get):
         db.set_telegram_offset(5)
         mock_get.return_value = _updates_response([])
-        code = ppc.main()
+        code = ppc.main(["--once"])
         self.assertEqual(code, 0)
         self.assertEqual(db.get_telegram_offset(), 5)
 
@@ -138,7 +139,7 @@ class TestFiltering(_BaseTestCase):
         mock_get.return_value = _updates_response(updates)
         mock_post.return_value = _response(200)
 
-        code = ppc.main()
+        code = ppc.main(["--once"])
 
         self.assertEqual(code, 0)
         self.assertEqual(self._promo_rows(), [])
@@ -151,7 +152,7 @@ class TestFiltering(_BaseTestCase):
         mock_get.return_value = _updates_response(updates)
         mock_post.return_value = _response(200)
 
-        code = ppc.main()
+        code = ppc.main(["--once"])
 
         self.assertEqual(code, 0)
         self.assertEqual(len(self._promo_rows()), 1)
@@ -168,7 +169,7 @@ class TestDuplicateInBatch(_BaseTestCase):
         mock_get.return_value = _updates_response(updates)
         mock_post.return_value = _response(200)
 
-        code = ppc.main()
+        code = ppc.main(["--once"])
 
         self.assertEqual(code, 0)
         self.assertEqual(len(self._promo_rows()), 1)
@@ -183,7 +184,7 @@ class TestNoMessage(_BaseTestCase):
         mock_get.return_value = _updates_response(updates)
         mock_post.return_value = _response(200)
 
-        code = ppc.main()
+        code = ppc.main(["--once"])
 
         self.assertEqual(code, 0)
         self.assertEqual(len(self._promo_rows()), 1)
@@ -198,7 +199,7 @@ class TestGetUpdatesFailures(_BaseTestCase):
     def test_500_on_all_retries_exit_1_offset_untouched(self, mock_get, mock_sleep):
         db.set_telegram_offset(7)
         mock_get.return_value = _response(500, {"description": "boom"})
-        code = ppc.main()
+        code = ppc.main(["--once"])
         self.assertEqual(code, 1)
         self.assertEqual(mock_get.call_count, len(ppc._RETRY_DELAYS))
         self.assertEqual(db.get_telegram_offset(), 7)
@@ -207,7 +208,7 @@ class TestGetUpdatesFailures(_BaseTestCase):
     def test_409_conflict_exits_1_without_retry(self, mock_get):
         db.set_telegram_offset(3)
         mock_get.return_value = _response(409, {"description": "Conflict: webhook is active"})
-        code = ppc.main()
+        code = ppc.main(["--once"])
         self.assertEqual(code, 1)
         self.assertEqual(mock_get.call_count, 1)
         self.assertEqual(db.get_telegram_offset(), 3)
@@ -215,7 +216,7 @@ class TestGetUpdatesFailures(_BaseTestCase):
     @patch("process_promo_callbacks.requests.get")
     def test_allowed_updates_sent_as_json_string(self, mock_get):
         mock_get.return_value = _updates_response([])
-        ppc.main()
+        ppc.main(["--once"])
         params = mock_get.call_args.kwargs["params"]
         self.assertEqual(json.loads(params["allowed_updates"]), ["callback_query"])
 
@@ -234,7 +235,7 @@ class TestPartialFailureOffset(_BaseTestCase):
         mock_post.return_value = _response(200)
         mock_log_promo.side_effect = [None, RuntimeError("boom"), None]
 
-        code = ppc.main()
+        code = ppc.main(["--once"])
 
         self.assertEqual(code, 1)
         self.assertEqual(db.get_telegram_offset(), 1)
@@ -248,11 +249,128 @@ class TestNonFatalAnswerFailure(_BaseTestCase):
         mock_get.return_value = _updates_response(updates)
         mock_post.return_value = _response(500, {"description": "boom"})
 
-        code = ppc.main()
+        code = ppc.main(["--once"])
 
         self.assertEqual(code, 0)
         self.assertEqual(db.get_telegram_offset(), 1)
         self.assertEqual(len(self._promo_rows()), 1)
+
+
+class TestOnceMode(_BaseTestCase):
+    @patch("process_promo_callbacks.requests.get")
+    def test_once_makes_single_getupdates_call_with_zero_timeout(self, mock_get):
+        mock_get.return_value = _updates_response([])
+        code = ppc.main(["--once"])
+        self.assertEqual(code, 0)
+        self.assertEqual(mock_get.call_count, 1)
+        params = mock_get.call_args.kwargs["params"]
+        self.assertEqual(params["timeout"], 0)
+
+
+class _DaemonTestCase(_BaseTestCase):
+    """База демон-тестов: сброс флага остановки и восстановление хендлеров.
+
+    main([]) регистрирует обработчики SIGTERM/SIGINT — возвращаем прежние,
+    чтобы не влиять на остальные тесты; остановку тестируем через флаг
+    _shutdown_signum, а не реальный сигнал (кроссплатформенно).
+    """
+
+    def setUp(self):
+        super().setUp()
+        ppc._shutdown_signum = None
+        self._prev_handlers = {
+            signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+            signal.SIGINT: signal.getsignal(signal.SIGINT),
+        }
+
+    def tearDown(self):
+        for signum, handler in self._prev_handlers.items():
+            signal.signal(signum, handler)
+        ppc._shutdown_signum = None
+        super().tearDown()
+
+
+class TestDaemonMode(_DaemonTestCase):
+    @patch("process_promo_callbacks.time.sleep")
+    @patch("process_promo_callbacks.run_iteration")
+    def test_network_error_does_not_kill_daemon(self, mock_iter, mock_sleep):
+        logger.debug("[test_process_promo_callbacks.check] daemon survives TelegramError, stops on _Shutdown")
+        mock_iter.side_effect = [
+            ppc.TelegramError("network down"),
+            0,
+            ppc._Shutdown(signal.SIGTERM),
+        ]
+        code = ppc.main([])
+        self.assertEqual(code, 0)
+        self.assertEqual(mock_iter.call_count, 3)
+        mock_sleep.assert_called_once_with(ppc._BACKOFF_INITIAL)
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_shutdown_flag_finishes_batch_saves_offset_returns_0(self, mock_get, mock_post):
+        logger.debug("[test_process_promo_callbacks.check] shutdown flag set mid-iteration: batch completes")
+        updates = [_update(11, _callback_query("promo:SEO:abc1"))]
+
+        def _get_and_request_shutdown(*args, **kwargs):
+            ppc._shutdown_signum = signal.SIGTERM
+            return _updates_response(updates)
+
+        mock_get.side_effect = _get_and_request_shutdown
+        mock_post.return_value = _response(200)
+
+        code = ppc.main([])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertEqual(db.get_telegram_offset(), 11)
+        self.assertEqual(len(self._promo_rows()), 1)
+
+    @patch("process_promo_callbacks.requests.get")
+    def test_409_in_daemon_mode_exits_1(self, mock_get):
+        logger.debug("[test_process_promo_callbacks.check] 409 is fatal in daemon mode")
+        mock_get.return_value = _response(409, {"description": "Conflict: webhook is active"})
+        code = ppc.main([])
+        self.assertEqual(code, 1)
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("process_promo_callbacks.requests.get")
+    def test_daemon_getupdates_uses_long_poll_timeout(self, mock_get):
+        logger.debug("[test_process_promo_callbacks.check] daemon passes poll_timeout=50 to getUpdates")
+
+        def _get_and_request_shutdown(*args, **kwargs):
+            ppc._shutdown_signum = signal.SIGTERM
+            return _updates_response([])
+
+        mock_get.side_effect = _get_and_request_shutdown
+
+        code = ppc.main([])
+
+        self.assertEqual(code, 0)
+        params = mock_get.call_args.kwargs["params"]
+        self.assertEqual(params["timeout"], ppc._POLL_TIMEOUT_DAEMON)
+        self.assertEqual(
+            mock_get.call_args.kwargs["timeout"],
+            ppc._POLL_TIMEOUT_DAEMON + ppc._GETUPDATES_HTTP_MARGIN,
+        )
+
+
+class TestTokenNotLogged(_BaseTestCase):
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_no_log_line_contains_token_at_debug_level(self, mock_get, mock_post):
+        logger.debug("[test_process_promo_callbacks.check] token must not leak into any DEBUG log line")
+        updates = [_update(1, _callback_query("promo:SEO:abc1"))]
+        mock_get.return_value = _updates_response(updates)
+        mock_post.return_value = _response(200)
+
+        with self.assertLogs(level="DEBUG") as cm:
+            code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        for line in cm.output:
+            self.assertNotIn("test-token", line)
+        # прямой критерий задачи 1: сторонний логгер urllib3 приглушён до INFO
+        self.assertEqual(logging.getLogger("urllib3").getEffectiveLevel(), logging.INFO)
 
 
 class TestParseCallbackData(unittest.TestCase):

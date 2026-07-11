@@ -1,16 +1,18 @@
 """Шаг вне ежедневного конвейера: опрос нажатий кнопки «✅ Запостил».
 
-Периодический (cron ~15 минут) самостоятельный скрипт. Читает getUpdates
-Telegram Bot API начиная с сохранённого в telegram_state offset, логирует
-подтверждённые публикации в promo_history через db.log_promo, отвечает на
-callback и убирает нажатую кнопку из клавиатуры сообщения. Ходит ТОЛЬКО в
-Telegram Bot API — ни одного запроса к Reddit; это не автопубликация, а
-локальный учёт факта «владелец сам запостил». Не импортирует другие шаги
-конвейера.
+Long-polling демон под systemd (без аргументов) либо один проход для отладки
+(`--once`). Читает getUpdates Telegram Bot API начиная с сохранённого в
+telegram_state offset, логирует подтверждённые публикации в promo_history
+через db.log_promo, отвечает на callback и убирает нажатую кнопку из
+клавиатуры сообщения. Ходит ТОЛЬКО в Telegram Bot API — ни одного запроса к
+Reddit; это не автопубликация, а локальный учёт факта «владелец сам
+запостил». Не импортирует другие шаги конвейера.
 """
+import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -33,8 +35,16 @@ logger = logging.getLogger("process_promo_callbacks")
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _RETRY_DELAYS = (2, 8, 30)
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
-_GETUPDATES_TIMEOUT = 30.0
+_GETUPDATES_TIMEOUT = 30.0  # минимальный HTTP-таймаут (--once, poll_timeout=0)
+_GETUPDATES_HTTP_MARGIN = 10.0  # запас HTTP-таймаута сверх long-poll таймаута
 _SHORT_TIMEOUT = 10.0
+_POLL_TIMEOUT_DAEMON = 50  # long-poll таймаут getUpdates в демон-режиме, сек
+_BACKOFF_INITIAL = 10  # пауза после сетевой ошибки в демон-режиме, сек
+_BACKOFF_MAX = 60
+
+# Выставляется сигнальным хендлером; страховка на случай прихода сигнала
+# вне блокирующего вызова — цикл демона проверяет перед каждой итерацией
+_shutdown_signum = None
 
 
 class WebhookConflictError(Exception):
@@ -45,22 +55,45 @@ class TelegramError(Exception):
     """getUpdates не удался после исчерпания ретраев."""
 
 
-def _get_updates(token: str, offset: int) -> list:
+class _Shutdown(BaseException):
+    """Поднимается сигнальным хендлером для graceful shutdown.
+
+    Наследник BaseException, а не Exception: PEP 475 перезапускает блокирующий
+    requests.get после возврата из хендлера, поэтому «тихий флаг» не прервал бы
+    висящий long poll до ~60с; исключение прерывает его сразу, и requests его
+    не перехватывает.
+    """
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _signal_handler(signum, frame):
+    global _shutdown_signum
+    _shutdown_signum = signum
+    raise _Shutdown(signum)
+
+
+def _get_updates(token: str, offset: int, poll_timeout: int = 0) -> list:
     """GET getUpdates с ретраями (стиль send_telegram.send_message).
 
+    poll_timeout — long-poll таймаут Telegram (0 = мгновенный ответ);
+    HTTP-таймаут requests всегда берётся с запасом сверх него.
     409 Conflict (webhook установлен) НЕ ретраится — фатальная ошибка сразу.
     """
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     params = {
         "offset": offset,
-        "timeout": 0,
+        "timeout": poll_timeout,
         "allowed_updates": json.dumps(["callback_query"]),
     }
+    http_timeout = max(_GETUPDATES_TIMEOUT, poll_timeout + _GETUPDATES_HTTP_MARGIN)
     attempts = len(_RETRY_DELAYS)
     for attempt in range(1, attempts + 1):
         logger.debug("[process_promo_callbacks._get_updates] attempt=%d offset=%d", attempt, offset)
         try:
-            response = requests.get(url, params=params, timeout=_GETUPDATES_TIMEOUT)
+            response = requests.get(url, params=params, timeout=http_timeout)
         except requests.exceptions.RequestException as exc:
             logger.warning("[process_promo_callbacks._get_updates] attempt=%d network error: %s", attempt, exc)
             if attempt < attempts:
@@ -208,29 +241,22 @@ def _handle_update(token: str, chat_id_env: str, update: dict, seen_callback_dat
     return True
 
 
-def main(argv=None) -> int:
-    load_dotenv(_REPO_ROOT / ".env")
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id_env = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id_env:
-        logger.error("[process_promo_callbacks.main] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID обязательны")
-        return 1
+def run_iteration(token: str, chat_id_env: str, poll_timeout: int) -> int:
+    """Одна итерация: getUpdates → обработка батча → продвижение offset.
 
+    WebhookConflictError/TelegramError из getUpdates распространяются наверх —
+    режимы (--once/демон) решают, фатальны ли они. Ошибка обработки апдейта
+    НЕ потребляет его: offset-watermark продвигается только за успешно
+    обработанные апдейты, упавший повторится в следующей итерации.
+    """
     offset = db.get_telegram_offset()
-    try:
-        updates = _get_updates(token, offset + 1)
-    except WebhookConflictError as exc:
-        logger.error("[process_promo_callbacks.main] %s", exc)
-        return 1
-    except TelegramError as exc:
-        logger.error("[process_promo_callbacks.main] getUpdates failed: %s", exc)
-        return 1
+    updates = _get_updates(token, offset + 1, poll_timeout)
 
     if not updates:
-        logger.debug("[process_promo_callbacks.main] no updates")
+        logger.debug("[process_promo_callbacks.run_iteration] no updates")
         return 0
 
-    logger.debug("[process_promo_callbacks.main] offset=%d received=%d updates", offset, len(updates))
+    logger.debug("[process_promo_callbacks.run_iteration] offset=%d received=%d updates", offset, len(updates))
 
     watermark = offset
     seen_callback_data = set()
@@ -245,14 +271,88 @@ def main(argv=None) -> int:
             processed += 1
             watermark = update_id
     except Exception as exc:
-        logger.error("[process_promo_callbacks.main] unexpected error while processing updates: %s", exc)
+        logger.error("[process_promo_callbacks.run_iteration] unexpected error while processing updates: %s", exc)
         exit_code = 1
     finally:
         db.set_telegram_offset(watermark)
-        logger.info("[process_promo_callbacks.main] processed=%d logged=%d new_offset=%d",
+        logger.info("[process_promo_callbacks.run_iteration] processed=%d logged=%d new_offset=%d",
                     processed, logged, watermark)
 
     return exit_code
+
+
+def _run_daemon(token: str, chat_id_env: str) -> int:
+    """Бесконечный long-polling цикл. Выход: 0 по сигналу, 1 по 409.
+
+    Сетевые ошибки (TelegramError) не фатальны — WARNING + нарастающий
+    backoff; 409 фатален: рестарт демона его не лечит, это сигнал владельцу
+    в journald снять webhook.
+    """
+    logger.info("[process_promo_callbacks._run_daemon] daemon started: poll_timeout=%d start_offset=%d",
+                _POLL_TIMEOUT_DAEMON, db.get_telegram_offset())
+    backoff = _BACKOFF_INITIAL
+    try:
+        while _shutdown_signum is None:
+            try:
+                run_iteration(token, chat_id_env, _POLL_TIMEOUT_DAEMON)
+                backoff = _BACKOFF_INITIAL
+            except WebhookConflictError as exc:
+                logger.error("[process_promo_callbacks._run_daemon] %s — рестарт не поможет, снять webhook", exc)
+                return 1
+            except TelegramError as exc:
+                logger.warning("[process_promo_callbacks._run_daemon] getUpdates failed: %s — retry in %ds",
+                               exc, backoff)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, _BACKOFF_MAX)
+    except _Shutdown as exc:
+        # offset уже сохранён finally-блоком итерации — просто выходим чисто
+        logger.info("[process_promo_callbacks._run_daemon] received signal %s, final_offset=%d, shutting down",
+                    exc.signum, db.get_telegram_offset())
+        return 0
+    logger.info("[process_promo_callbacks._run_daemon] shutdown flag set (signal %s), final_offset=%d",
+                _shutdown_signum, db.get_telegram_offset())
+    return 0
+
+
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(
+        # без эмодзи: argparse печатает help в консоль, на Windows (cp1251)
+        # символ вне кодировки роняет --help с UnicodeEncodeError
+        description="Опрос нажатий кнопки «Запостил» (Telegram Bot API getUpdates)."
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="один проход getUpdates (timeout=0) и выход — для отладки и тестов",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
+    load_dotenv(_REPO_ROOT / ".env")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id_env = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id_env:
+        logger.error("[process_promo_callbacks.main] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID обязательны")
+        return 1
+
+    if args.once:
+        logger.info("[process_promo_callbacks.main] once mode: start_offset=%d", db.get_telegram_offset())
+        try:
+            return run_iteration(token, chat_id_env, poll_timeout=0)
+        except WebhookConflictError as exc:
+            logger.error("[process_promo_callbacks.main] %s", exc)
+            return 1
+        except TelegramError as exc:
+            logger.error("[process_promo_callbacks.main] getUpdates failed: %s", exc)
+            return 1
+
+    # Демон-режим: хендлеры только здесь, не на уровне модуля — импорт в тестах
+    # остаётся чистым (signal.signal работает и на Windows для SIGTERM/SIGINT)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    return _run_daemon(token, chat_id_env)
 
 
 if __name__ == "__main__":
