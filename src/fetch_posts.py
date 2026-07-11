@@ -30,6 +30,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     stream=sys.stderr,
 )
+# urllib3 на DEBUG печатает полный URL каждого запроса; для единообразия с
+# Telegram-шагами (там URL содержит токен бота) глушим сторонний логгер
+logging.getLogger("urllib3").setLevel(logging.INFO)
 logger = logging.getLogger("fetch_posts")
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent

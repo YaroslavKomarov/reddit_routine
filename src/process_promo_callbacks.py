@@ -25,6 +25,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     stream=sys.stderr,
 )
+# urllib3 на DEBUG печатает полный URL запроса вида /bot<token>/... — токен
+# утёк бы в логи; глушим только сторонний логгер, свои DEBUG-строки остаются
+logging.getLogger("urllib3").setLevel(logging.INFO)
 logger = logging.getLogger("process_promo_callbacks")
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
