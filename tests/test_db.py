@@ -290,5 +290,39 @@ class TestRunLog(DbTestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+class TestSubPause(DbTestCase):
+    def test_pause_then_get_contains(self):
+        self.assertTrue(db.pause_sub("SEO"))
+        self.assertEqual(db.get_paused_subs(), {"SEO"})
+
+    def test_repeated_pause_returns_false_and_keeps_paused_at(self):
+        self.assertTrue(db.pause_sub("SEO"))
+        conn = db.connect()
+        try:
+            first_paused_at = conn.execute(
+                "SELECT paused_at FROM sub_pause WHERE subreddit = 'SEO'"
+            ).fetchone()["paused_at"]
+        finally:
+            conn.close()
+        self.assertFalse(db.pause_sub("SEO"))
+        conn = db.connect()
+        try:
+            second_paused_at = conn.execute(
+                "SELECT paused_at FROM sub_pause WHERE subreddit = 'SEO'"
+            ).fetchone()["paused_at"]
+        finally:
+            conn.close()
+        self.assertEqual(first_paused_at, second_paused_at)
+
+    def test_resume_returns_true_then_false(self):
+        db.pause_sub("SEO")
+        self.assertTrue(db.resume_sub("SEO"))
+        self.assertFalse(db.resume_sub("SEO"))
+        self.assertEqual(db.get_paused_subs(), set())
+
+    def test_get_paused_subs_empty_on_fresh_db(self):
+        self.assertEqual(db.get_paused_subs(), set())
+
+
 if __name__ == "__main__":
     unittest.main()

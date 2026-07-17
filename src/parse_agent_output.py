@@ -109,12 +109,19 @@ def validate_digest(parsed: dict, batch_ids: set, promo_state: list) -> list:
             for field in ("subreddit", "title", "body"):
                 _require_str(question_post, field, "question_post", errors)
             sub = question_post.get("subreddit")
-            if isinstance(sub, str) and sub in question_allowed and not question_allowed[sub]:
-                logger.warning(
-                    "[parse_agent_output.validate_digest] question_post назначен в '%s', "
-                    "где question_posts_allowed=false — проверь перед публикацией",
-                    sub,
-                )
+            if isinstance(sub, str):
+                if sub not in question_allowed:
+                    logger.warning(
+                        "[parse_agent_output.validate_digest] question_post назначен в '%s' вне promo_state "
+                        "(саб на паузе или неизвестен) — проверь перед публикацией",
+                        sub,
+                    )
+                elif not question_allowed[sub]:
+                    logger.warning(
+                        "[parse_agent_output.validate_digest] question_post назначен в '%s', "
+                        "где question_posts_allowed=false — проверь перед публикацией",
+                        sub,
+                    )
 
     suggestions = parsed.get("suggestions")
     if not isinstance(suggestions, list):

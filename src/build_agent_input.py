@@ -139,7 +139,8 @@ def read_context_files(subreddits_cfg: list) -> tuple:
 
 def main() -> int:
     cfg = config.load_config()
-    subreddits_cfg = cfg["subreddits"]
+    paused = db.get_paused_subs()
+    subreddits_cfg = [s for s in cfg["subreddits"] if s["name"] not in paused]
 
     batch_path = _batch_path()
     logger.debug("[build_agent_input.main] batch path: %s", batch_path)
@@ -152,7 +153,24 @@ def main() -> int:
     with open(batch_path, "r", encoding="utf-8") as f:
         posts = json.load(f)
 
+    if paused:
+        dropped_subs = [s["name"] for s in cfg["subreddits"] if s["name"] in paused]
+        posts_before = len(posts)
+        posts = [p for p in posts if p["subreddit"] not in paused]
+        logger.info(
+            "[build_agent_input.main] paused filtering: %d subreddit(s) %s dropped, %d post(s) excluded",
+            len(dropped_subs), dropped_subs, posts_before - len(posts),
+        )
+
     product, tone, subreddit_rules = read_context_files(subreddits_cfg)
+
+    question_of_the_day = pop_question()
+    if question_of_the_day is not None and question_of_the_day["target_sub"] in paused:
+        logger.info(
+            "[build_agent_input.main] question target_sub '%s' is paused — retargeting to agent",
+            question_of_the_day["target_sub"],
+        )
+        question_of_the_day["target_sub"] = None
 
     agent_input = {
         "date": date.today().isoformat(),
@@ -160,7 +178,7 @@ def main() -> int:
         "tone": tone,
         "subreddit_rules": subreddit_rules,
         "promo_state": build_promo_state(subreddits_cfg),
-        "question_of_the_day": pop_question(),
+        "question_of_the_day": question_of_the_day,
         "posts": posts,
         "selection_config": {
             "posts_per_sub": cfg["selection"]["posts_per_sub"],

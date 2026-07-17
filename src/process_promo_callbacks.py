@@ -20,6 +20,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+import config
 import db
 
 logging.basicConfig(
@@ -86,7 +87,7 @@ def _get_updates(token: str, offset: int, poll_timeout: int = 0) -> list:
     params = {
         "offset": offset,
         "timeout": poll_timeout,
-        "allowed_updates": json.dumps(["callback_query"]),
+        "allowed_updates": json.dumps(["callback_query", "message"]),
     }
     http_timeout = max(_GETUPDATES_TIMEOUT, poll_timeout + _GETUPDATES_HTTP_MARGIN)
     attempts = len(_RETRY_DELAYS)
@@ -145,6 +146,18 @@ def _answer_callback_query(token: str, callback_query_id: str, text: str) -> Non
         logger.warning("[process_promo_callbacks._answer_callback_query] network error: %s", exc)
 
 
+def _send_message(token: str, chat_id, text: str) -> None:
+    """Не-фатально: сбой отправки ответа не должен ронять прогон (стиль _answer_callback_query)."""
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        response = requests.post(url, data={"chat_id": chat_id, "text": text}, timeout=_SHORT_TIMEOUT)
+        if response.status_code != 200:
+            logger.warning("[process_promo_callbacks._send_message] status=%d body=%s",
+                           response.status_code, response.text)
+    except requests.exceptions.RequestException as exc:
+        logger.warning("[process_promo_callbacks._send_message] network error: %s", exc)
+
+
 def _edit_message_reply_markup(token: str, chat_id, message_id, reply_markup: dict) -> None:
     """Не-фатально: сбой снятия кнопки не должен ронять прогон. 400 «not modified» — успех."""
     url = f"https://api.telegram.org/bot{token}/editMessageReplyMarkup"
@@ -185,8 +198,94 @@ def _parse_callback_data(data: str):
     return sub, post_id
 
 
+_SUBS_COMMANDS = ("/subs", "/pause", "/resume")
+
+
+def _format_subs_status() -> str:
+    """Список сабов из config.yaml со статусом ⏸/✅; паузнутые вне config.yaml — отдельной строкой."""
+    cfg_subs = [sub["name"] for sub in config.load_config()["subreddits"]]
+    paused = db.get_paused_subs()
+    lines = [f"{name}: {'⏸ на паузе' if name in paused else '✅ активен'}" for name in cfg_subs]
+    for name in sorted(paused - set(cfg_subs)):
+        lines.append(f"{name}: ⏸ на паузе (нет в config.yaml)")
+    return "\n".join(lines) if lines else "сабреддиты не настроены"
+
+
+def _handle_message(token: str, chat_id_env: str, update: dict) -> bool:
+    """Обработать текстовое сообщение с командой /subs, /pause, /resume.
+
+    Возвращает True, если команда исполнена. Невалидные/чужие/нерелевантные
+    сообщения — молча потребляются (False), не поднимают исключение. Сбой
+    db.pause_sub/resume_sub распространяется наверх — как у log_promo, апдейт
+    не потребляется и повторится.
+    """
+    update_id = update.get("update_id")
+    message = update.get("message")
+    text = message.get("text") if message else None
+    if not message or not text:
+        logger.debug("[process_promo_callbacks._handle_message] update %s has no message/text, skipping", update_id)
+        return False
+
+    chat_id = message.get("chat", {}).get("id")
+    if chat_id is None or str(chat_id) != chat_id_env.strip():
+        logger.warning("[process_promo_callbacks._handle_message] update %s from foreign/unknown chat %s, ignoring",
+                       update_id, chat_id)
+        return False
+
+    parts = text.strip().split(maxsplit=1)
+    command = parts[0].split("@", 1)[0]
+    arg = parts[1].strip() if len(parts) > 1 else None
+
+    if command not in _SUBS_COMMANDS:
+        logger.debug("[process_promo_callbacks._handle_message] update %s text %r not a subs command, skipping",
+                     update_id, text)
+        return False
+
+    if command == "/subs":
+        logger.info("[process_promo_callbacks._handle_message] command=/subs")
+        _send_message(token, chat_id, _format_subs_status())
+        return True
+
+    if not arg:
+        _send_message(token, chat_id, f"использование: {command} <subreddit>")
+        return True
+
+    known = {sub["name"] for sub in config.load_config()["subreddits"]}
+    if arg not in known:
+        logger.warning("[process_promo_callbacks._handle_message] command=%s unknown subreddit '%s'", command, arg)
+        _send_message(token, chat_id, f"неизвестный сабреддит '{arg}'\nизвестные: {', '.join(sorted(known))}")
+        return True
+
+    if command == "/pause":
+        paused_now = db.pause_sub(arg)
+        result = "paused" if paused_now else "already_paused"
+        reply = f"⏸ r/{arg} на паузе — действует со следующего прогона" if paused_now else f"r/{arg} уже на паузе"
+    else:
+        was_paused = db.resume_sub(arg)
+        result = "resumed" if was_paused else "was_not_paused"
+        reply = f"✅ r/{arg} снова активен" if was_paused else f"r/{arg} и не был на паузе"
+    logger.info("[process_promo_callbacks._handle_message] command=%s sub='%s' result=%s", command, arg, result)
+    _send_message(token, chat_id, reply)
+    return True
+
+
 def _handle_update(token: str, chat_id_env: str, update: dict, seen_callback_data: set) -> bool:
-    """Обработать один апдейт. Возвращает True, если промо залогирован.
+    """Диспетчер: callback_query -> _handle_callback, message -> _handle_message.
+
+    Возвращает True, если промо залогирован или TG-команда исполнена.
+    """
+    update_id = update.get("update_id")
+    if update.get("callback_query"):
+        return _handle_callback(token, chat_id_env, update, seen_callback_data)
+    if update.get("message"):
+        return _handle_message(token, chat_id_env, update)
+    logger.debug("[process_promo_callbacks._handle_update] update %s has no callback_query/message, skipping",
+                 update_id)
+    return False
+
+
+def _handle_callback(token: str, chat_id_env: str, update: dict, seen_callback_data: set) -> bool:
+    """Обработать один callback_query-апдейт. Возвращает True, если промо залогирован.
 
     Ожидаемые/невалидные случаи (чужой чат, не-promo callback, дубль) —
     считаются потреблёнными и не поднимают исключение. Непредвиденные
@@ -195,30 +294,27 @@ def _handle_update(token: str, chat_id_env: str, update: dict, seen_callback_dat
     """
     update_id = update.get("update_id")
     callback_query = update.get("callback_query")
-    if not callback_query:
-        logger.debug("[process_promo_callbacks._handle_update] update %s has no callback_query, skipping", update_id)
-        return False
 
     message = callback_query.get("message")
     chat_id = None
     if message is not None:
         chat_id = message.get("chat", {}).get("id")
         if chat_id is None or str(chat_id) != chat_id_env.strip():
-            logger.warning("[process_promo_callbacks._handle_update] update %s from foreign/unknown chat %s, ignoring",
+            logger.warning("[process_promo_callbacks._handle_callback] update %s from foreign/unknown chat %s, ignoring",
                            update_id, chat_id)
             return False
 
     data = callback_query.get("data", "") or ""
     parsed = _parse_callback_data(data)
     if parsed is None:
-        logger.debug("[process_promo_callbacks._handle_update] update %s data %r not a valid promo callback, skipping",
+        logger.debug("[process_promo_callbacks._handle_callback] update %s data %r not a valid promo callback, skipping",
                      update_id, data)
         return False
     sub, post_id = parsed
 
     callback_id = callback_query.get("id")
     if data in seen_callback_data:
-        logger.info("[process_promo_callbacks._handle_update] duplicate callback_data %r in batch, skipping log_promo",
+        logger.info("[process_promo_callbacks._handle_callback] duplicate callback_data %r in batch, skipping log_promo",
                     data)
         _answer_callback_query(token, callback_id, "Уже залогировано")
         return False
@@ -226,11 +322,11 @@ def _handle_update(token: str, chat_id_env: str, update: dict, seen_callback_dat
 
     post_url = f"https://www.reddit.com/comments/{post_id}"
     db.log_promo(sub, "comment_promo", post_url=post_url)
-    logger.info("[process_promo_callbacks._handle_update] logged promo sub='%s' post_id='%s'", sub, post_id)
+    logger.info("[process_promo_callbacks._handle_callback] logged promo sub='%s' post_id='%s'", sub, post_id)
     _answer_callback_query(token, callback_id, "Залогировано ✅")
 
     if message is None:
-        logger.warning("[process_promo_callbacks._handle_update] update %s has no message, skipping edit", update_id)
+        logger.warning("[process_promo_callbacks._handle_callback] update %s has no message, skipping edit", update_id)
         return True
 
     reply_markup = message.get("reply_markup") or {}

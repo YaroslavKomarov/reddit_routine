@@ -66,6 +66,12 @@ _SCHEMA = {
             value TEXT
         )
     """,
+    "sub_pause": """
+        CREATE TABLE IF NOT EXISTS sub_pause (
+            subreddit  TEXT PRIMARY KEY,
+            paused_at  TEXT NOT NULL
+        )
+    """,
 }
 
 _TELEGRAM_OFFSET_KEY = "updates_offset"
@@ -335,6 +341,43 @@ def recent_runs(limit: int = 10) -> list:
     runs = [dict(row) for row in rows]
     logger.debug("[db.recent_runs] returned %d rows", len(runs))
     return runs
+
+
+# --- sub_pause -----------------------------------------------------------
+
+def pause_sub(subreddit: str) -> bool:
+    with contextlib.closing(connect()) as conn:
+        with conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO sub_pause (subreddit, paused_at) VALUES (?, ?)",
+                (subreddit, utcnow_iso()),
+            )
+    paused_now = bool(cursor.rowcount)
+    logger.info(
+        "[db.pause_sub] subreddit='%s' result=%s",
+        subreddit, "paused" if paused_now else "already paused",
+    )
+    return paused_now
+
+
+def resume_sub(subreddit: str) -> bool:
+    with contextlib.closing(connect()) as conn:
+        with conn:
+            cursor = conn.execute("DELETE FROM sub_pause WHERE subreddit = ?", (subreddit,))
+    was_paused = bool(cursor.rowcount)
+    logger.info(
+        "[db.resume_sub] subreddit='%s' result=%s",
+        subreddit, "resumed" if was_paused else "was not paused",
+    )
+    return was_paused
+
+
+def get_paused_subs() -> set:
+    with contextlib.closing(connect()) as conn:
+        rows = conn.execute("SELECT subreddit FROM sub_pause").fetchall()
+    paused = {row["subreddit"] for row in rows}
+    logger.debug("[db.get_paused_subs] count=%d paused=%s", len(paused), sorted(paused))
+    return paused
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

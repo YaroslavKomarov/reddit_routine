@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
@@ -392,6 +393,38 @@ class TestMain(unittest.TestCase):
         fetch_posts.main()
         sleep_calls = [call.args[0] for call in self.mock_sleep.call_args_list]
         self.assertIn(32, sleep_calls)
+
+    @patch("fetch_posts.config.load_config")
+    @patch("fetch_posts.fetch_subreddit_feed")
+    def test_paused_sub_feed_not_requested_and_excluded_from_batch(self, mock_fetch, mock_load_config):
+        mock_load_config.return_value = self.cfg
+        db.pause_sub("TechSEO")
+        rate_info = {"remaining": "5.0", "reset": "31"}
+        fresh = datetime.now(timezone.utc).isoformat()
+        mock_fetch.side_effect = [
+            (_feed_xml(_entry_xml(post_id="p1", published=fresh, updated=fresh)), rate_info),
+            (_feed_xml(_entry_xml(post_id="p3", published=fresh, updated=fresh)), rate_info),
+        ]
+        code = fetch_posts.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(mock_fetch.call_count, 2)
+        requested_subs = {call.args[0] for call in mock_fetch.call_args_list}
+        self.assertNotIn("TechSEO", requested_subs)
+        with open(self.tmp_batch_path, encoding="utf-8") as f:
+            batch = json.load(f)
+        ids = {p["id"] for p in batch}
+        self.assertEqual(ids, {"p1", "p3"})
+
+    @patch("fetch_posts.config.load_config")
+    @patch("fetch_posts.fetch_subreddit_feed")
+    def test_all_subs_paused_exit_1_and_no_fetch_calls(self, mock_fetch, mock_load_config):
+        mock_load_config.return_value = self.cfg
+        for sub in self.cfg["subreddits"]:
+            db.pause_sub(sub["name"])
+        code = fetch_posts.main()
+        self.assertEqual(code, 1)
+        mock_fetch.assert_not_called()
+        self.assertFalse(os.path.exists(self.tmp_batch_path))
 
 
 if __name__ == "__main__":

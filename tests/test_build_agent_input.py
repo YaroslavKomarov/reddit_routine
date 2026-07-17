@@ -190,6 +190,65 @@ class TestMain(BuildAgentInputTestCase):
         self.assertEqual(code, 1)
         self.assertFalse(self.input_path.exists())
 
+    @patch("build_agent_input.config.load_config")
+    def test_paused_sub_absent_from_promo_state_and_rules(self, mock_load_config):
+        mock_load_config.return_value = self.cfg
+        db.pause_sub("bigseo")
+        self._write_batch([])
+
+        code = build_agent_input.main()
+        self.assertEqual(code, 0)
+        with open(self.input_path, encoding="utf-8") as f:
+            agent_input = json.load(f)
+        promo_subs = {s["subreddit"] for s in agent_input["promo_state"]}
+        self.assertEqual(promo_subs, {"SEO"})
+        self.assertEqual(set(agent_input["subreddit_rules"].keys()), {"SEO"})
+
+    @patch("build_agent_input.config.load_config")
+    def test_paused_sub_posts_excluded_from_batch(self, mock_load_config):
+        mock_load_config.return_value = self.cfg
+        db.pause_sub("bigseo")
+        posts = [
+            {"id": "p1", "subreddit": "SEO", "title": "t1", "selftext": "", "url": "u1",
+             "permalink": "pl1", "score": 1, "num_comments": 0, "created_utc": 1.0},
+            {"id": "p2", "subreddit": "bigseo", "title": "t2", "selftext": "s", "url": "u2",
+             "permalink": "pl2", "score": 2, "num_comments": 3, "created_utc": 2.0},
+        ]
+        self._write_batch(posts)
+
+        code = build_agent_input.main()
+        self.assertEqual(code, 0)
+        with open(self.input_path, encoding="utf-8") as f:
+            agent_input = json.load(f)
+        ids = {p["id"] for p in agent_input["posts"]}
+        self.assertEqual(ids, {"p1"})
+
+    @patch("build_agent_input.config.load_config")
+    def test_question_with_paused_target_sub_retargeted_to_none(self, mock_load_config):
+        mock_load_config.return_value = self.cfg
+        db.pause_sub("bigseo")
+        db.add_question("вопрос?", target_sub="bigseo")
+        self._write_batch([])
+
+        code = build_agent_input.main()
+        self.assertEqual(code, 0)
+        with open(self.input_path, encoding="utf-8") as f:
+            agent_input = json.load(f)
+        self.assertEqual(agent_input["question_of_the_day"], {"text": "вопрос?", "target_sub": None})
+
+    @patch("build_agent_input.config.load_config")
+    def test_question_with_active_target_sub_unchanged(self, mock_load_config):
+        mock_load_config.return_value = self.cfg
+        db.pause_sub("bigseo")
+        db.add_question("вопрос?", target_sub="SEO")
+        self._write_batch([])
+
+        code = build_agent_input.main()
+        self.assertEqual(code, 0)
+        with open(self.input_path, encoding="utf-8") as f:
+            agent_input = json.load(f)
+        self.assertEqual(agent_input["question_of_the_day"], {"text": "вопрос?", "target_sub": "SEO"})
+
 
 if __name__ == "__main__":
     unittest.main()

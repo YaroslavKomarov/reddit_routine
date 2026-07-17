@@ -59,6 +59,19 @@ def _update(update_id, callback_query=None):
     return payload
 
 
+def _msg_update(update_id, text, chat_id=42):
+    return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
+
+
+_CFG = {
+    "subreddits": [
+        {"name": "SEO"},
+        {"name": "TechSEO"},
+        {"name": "bigseo"},
+    ],
+}
+
+
 class _BaseTestCase(unittest.TestCase):
     def setUp(self):
         self._prev_env = {key: os.environ.get(key) for key in _ENV_KEYS}
@@ -218,7 +231,7 @@ class TestGetUpdatesFailures(_BaseTestCase):
         mock_get.return_value = _updates_response([])
         ppc.main(["--once"])
         params = mock_get.call_args.kwargs["params"]
-        self.assertEqual(json.loads(params["allowed_updates"]), ["callback_query"])
+        self.assertEqual(json.loads(params["allowed_updates"]), ["callback_query", "message"])
 
 
 class TestPartialFailureOffset(_BaseTestCase):
@@ -371,6 +384,119 @@ class TestTokenNotLogged(_BaseTestCase):
             self.assertNotIn("test-token", line)
         # прямой критерий задачи 1: сторонний логгер urllib3 приглушён до INFO
         self.assertEqual(logging.getLogger("urllib3").getEffectiveLevel(), logging.INFO)
+
+
+class TestSubsCommands(_BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.load_config_patcher = patch("process_promo_callbacks.config.load_config", return_value=_CFG)
+        self.load_config_patcher.start()
+
+    def tearDown(self):
+        self.load_config_patcher.stop()
+        super().tearDown()
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_pause_from_own_chat_pauses_and_confirms(self, mock_get, mock_post):
+        mock_get.return_value = _updates_response([_msg_update(1, "/pause SEO")])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(db.get_paused_subs(), {"SEO"})
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 1)
+        self.assertIn("SEO", send_calls[0].kwargs["data"]["text"])
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_pause_unknown_subreddit_not_paused_lists_known(self, mock_get, mock_post):
+        mock_get.return_value = _updates_response([_msg_update(1, "/pause typo_sub")])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(db.get_paused_subs(), set())
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 1)
+        reply_text = send_calls[0].kwargs["data"]["text"]
+        self.assertIn("SEO", reply_text)
+        self.assertIn("TechSEO", reply_text)
+        self.assertIn("bigseo", reply_text)
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_subs_command_reports_statuses(self, mock_get, mock_post):
+        db.pause_sub("SEO")
+        mock_get.return_value = _updates_response([_msg_update(1, "/subs")])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 1)
+        reply_text = send_calls[0].kwargs["data"]["text"]
+        self.assertIn("SEO: ⏸ на паузе", reply_text)
+        self.assertIn("TechSEO: ✅ активен", reply_text)
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_foreign_chat_message_not_executed(self, mock_get, mock_post):
+        mock_get.return_value = _updates_response([_msg_update(1, "/pause SEO", chat_id=999)])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(db.get_paused_subs(), set())
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 0)
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_non_command_text_silently_consumed_offset_advances(self, mock_get, mock_post):
+        mock_get.return_value = _updates_response([_msg_update(1, "привет")])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(db.get_telegram_offset(), 1)
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 0)
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_mixed_batch_callback_and_message_processed_offset_is_last(self, mock_get, mock_post):
+        updates = [
+            _update(1, _callback_query("promo:SEO:abc1")),
+            _msg_update(2, "/subs"),
+        ]
+        mock_get.return_value = _updates_response(updates)
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(db.get_telegram_offset(), 2)
+        self.assertEqual(len(self._promo_rows()), 1)
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 1)
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_pause_with_botname_suffix_works_like_plain_command(self, mock_get, mock_post):
+        mock_get.return_value = _updates_response([_msg_update(1, "/pause@my_bot SEO")])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(db.get_paused_subs(), {"SEO"})
 
 
 class TestParseCallbackData(unittest.TestCase):

@@ -259,7 +259,16 @@ def main() -> int:
     cfg = config.load_config()
     seen_ids = db.get_seen_post_ids()
     fetch_cfg = cfg["fetch"]
-    subreddits = cfg["subreddits"]
+    paused = db.get_paused_subs()
+    subreddits = [s for s in cfg["subreddits"] if s["name"] not in paused]
+
+    if paused:
+        skipped = [s["name"] for s in cfg["subreddits"] if s["name"] in paused]
+        logger.info("[fetch_posts.main] paused subreddits skipped: %s", skipped)
+
+    if not subreddits:
+        logger.error("[fetch_posts.main] all subreddits are paused, nothing to fetch")
+        return 1
 
     batch = []
     succeeded = []

@@ -216,6 +216,28 @@ class TestPromoKeyboard(unittest.TestCase):
         self.assertNotIn("reply_markup", payload)
 
 
+class TestBuildMessagesPaused(unittest.TestCase):
+    def test_empty_paused_first_message_has_no_paused_line(self):
+        messages = send_telegram.build_messages(
+            _valid_digest(), {}, {"unused": 0}, split_by_subreddit=True, paused_subs=[]
+        )
+        self.assertNotIn("на паузе", messages[0][0])
+
+    def test_paused_subs_appear_in_first_message_in_given_order(self):
+        messages = send_telegram.build_messages(
+            _valid_digest(), {}, {"unused": 0}, split_by_subreddit=True,
+            paused_subs=["SEO", "TechSEO"],
+        )
+        first_text = messages[0][0]
+        self.assertIn("⏸ на паузе: r/SEO, r/TechSEO", first_text)
+
+    def test_paused_subs_default_none_has_no_paused_line(self):
+        messages = send_telegram.build_messages(
+            _valid_digest(), {}, {"unused": 0}, split_by_subreddit=True,
+        )
+        self.assertNotIn("на паузе", messages[0][0])
+
+
 class _CliTestCase(unittest.TestCase):
     """Общий setUp CLI-тестов: временная БД, DIGEST_PATH, токены в env."""
 
@@ -295,6 +317,18 @@ class TestDryRunMode(_CliTestCase):
     def test_dry_run_with_missing_digest_exits_1(self):
         code = send_telegram.main(["--dry-run"])
         self.assertEqual(code, 1)
+
+    @patch("send_telegram.db.log_run")
+    @patch("send_telegram.requests.post")
+    def test_dry_run_shows_paused_subs_in_first_message(self, mock_post, mock_log_run):
+        self._write_digest()
+        db.pause_sub("SEO")
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = send_telegram.main(["--dry-run"])
+        self.assertEqual(code, 0)
+        output = buffer.getvalue()
+        self.assertIn("⏸ на паузе: r/SEO", output)
 
     @patch("send_telegram.db.log_run")
     @patch("send_telegram.requests.post")

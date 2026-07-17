@@ -238,10 +238,15 @@ def split_message(text: str, limit: int = _TG_LIMIT) -> list:
     return chunks
 
 
-def build_messages(digest: dict, stats: dict, queue_stats: dict, split_by_subreddit: bool) -> list:
+def build_messages(digest: dict, stats: dict, queue_stats: dict, split_by_subreddit: bool,
+                    paused_subs: list = None) -> list:
     """Полный список пар (text, reply_markup | None) дайджеста в порядке отправки."""
-    logger.debug("[send_telegram.build_messages] split_by_subreddit=%s", split_by_subreddit)
-    messages = [(format_question_post(digest.get("question_post"), queue_stats.get("unused", 0)), None)]
+    logger.debug("[send_telegram.build_messages] split_by_subreddit=%s paused_subs=%s",
+                 split_by_subreddit, paused_subs)
+    header_text = format_question_post(digest.get("question_post"), queue_stats.get("unused", 0))
+    if paused_subs:
+        header_text += "\n\n⏸ на паузе: " + ", ".join(f"r/{escape(sub)}" for sub in paused_subs)
+    messages = [(header_text, None)]
 
     groups = digest.get("suggestions") or []
     has_promo = any(
@@ -381,7 +386,8 @@ def main(argv=None) -> int:
 
     queue_stats = db.queue_stats()
     split_by_subreddit = bool(config.load_config().get("telegram", {}).get("split_by_subreddit", True))
-    messages = build_messages(digest, stats, queue_stats, split_by_subreddit)
+    paused_subs = sorted(db.get_paused_subs())
+    messages = build_messages(digest, stats, queue_stats, split_by_subreddit, paused_subs)
 
     if args.dry_run:
         logger.info("[send_telegram.main] dry-run: printing %d message(s) to stdout", len(messages))

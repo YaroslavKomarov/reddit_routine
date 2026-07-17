@@ -135,6 +135,15 @@ class TestValidateDigest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(any("question_posts_allowed=false" in line for line in captured.output))
 
+    def test_question_post_in_sub_outside_promo_state_warns_but_no_error(self):
+        digest = _valid_digest(
+            question_post={"subreddit": "SEOTools", "title": "t", "body": "b", "notes": "n"}
+        )
+        with self.assertLogs("parse_agent_output", level="WARNING") as captured:
+            errors = parse_agent_output.validate_digest(digest, self.BATCH_IDS, _PROMO_STATE)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("вне promo_state" in line for line in captured.output))
+
 
 class TestMain(unittest.TestCase):
     def setUp(self):
