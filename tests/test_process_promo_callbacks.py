@@ -445,6 +445,34 @@ class TestSubsCommands(_BaseTestCase):
 
     @patch("process_promo_callbacks.requests.post")
     @patch("process_promo_callbacks.requests.get")
+    def test_help_command_replies_with_command_list(self, mock_get, mock_post):
+        mock_get.return_value = _updates_response([_msg_update(1, "/help")])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 1)
+        reply_text = send_calls[0].kwargs["data"]["text"]
+        for command in ("/subs", "/pause", "/resume", "/help"):
+            self.assertIn(command, reply_text)
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
+    def test_start_command_replies_like_help(self, mock_get, mock_post):
+        mock_get.return_value = _updates_response([_msg_update(1, "/start")])
+        mock_post.return_value = _response(200)
+
+        code = ppc.main(["--once"])
+
+        self.assertEqual(code, 0)
+        send_calls = [c for c in mock_post.call_args_list if "sendMessage" in c.args[0]]
+        self.assertEqual(len(send_calls), 1)
+        self.assertIn("/pause", send_calls[0].kwargs["data"]["text"])
+
+    @patch("process_promo_callbacks.requests.post")
+    @patch("process_promo_callbacks.requests.get")
     def test_foreign_chat_message_not_executed(self, mock_get, mock_post):
         mock_get.return_value = _updates_response([_msg_update(1, "/pause SEO", chat_id=999)])
         mock_post.return_value = _response(200)

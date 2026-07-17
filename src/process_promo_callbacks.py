@@ -198,7 +198,15 @@ def _parse_callback_data(data: str):
     return sub, post_id
 
 
-_SUBS_COMMANDS = ("/subs", "/pause", "/resume")
+_SUBS_COMMANDS = ("/subs", "/pause", "/resume", "/help", "/start")
+
+_HELP_TEXT = (
+    "Команды:\n"
+    "/subs — статус всех сабреддитов (⏸ на паузе / ✅ активен)\n"
+    "/pause <sub> — поставить сабреддит на паузу (действует со следующего прогона)\n"
+    "/resume <sub> — снять сабреддит с паузы\n"
+    "/help — эта подсказка"
+)
 
 
 def _format_subs_status() -> str:
@@ -212,7 +220,7 @@ def _format_subs_status() -> str:
 
 
 def _handle_message(token: str, chat_id_env: str, update: dict) -> bool:
-    """Обработать текстовое сообщение с командой /subs, /pause, /resume.
+    """Обработать текстовое сообщение с командой /subs, /pause, /resume, /help.
 
     Возвращает True, если команда исполнена. Невалидные/чужие/нерелевантные
     сообщения — молча потребляются (False), не поднимают исключение. Сбой
@@ -240,6 +248,11 @@ def _handle_message(token: str, chat_id_env: str, update: dict) -> bool:
         logger.debug("[process_promo_callbacks._handle_message] update %s text %r not a subs command, skipping",
                      update_id, text)
         return False
+
+    if command in ("/help", "/start"):
+        logger.info("[process_promo_callbacks._handle_message] command=%s", command)
+        _send_message(token, chat_id, _HELP_TEXT)
+        return True
 
     if command == "/subs":
         logger.info("[process_promo_callbacks._handle_message] command=/subs")
